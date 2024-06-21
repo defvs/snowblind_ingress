@@ -20,8 +20,7 @@ static const clap_plugin_descriptor_t s_my_plug_desc = {
         .support_url = "https://your-domain.com/support",
         .version = "1.4.2",
         .description = "The plugin description.",
-        .features = (const char *[]) {CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_UTILITY,
-                                      CLAP_PLUGIN_FEATURE_STEREO, NULL},
+        .features = (const char *[]) {CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_UTILITY, NULL},
 };
 
 typedef struct {
@@ -36,33 +35,6 @@ typedef struct {
     uint32_t latency;
     uint8_t layer_id;
 } my_plug_t;
-
-/////////////////////////////
-// clap_plugin_audio_ports //
-/////////////////////////////
-
-static uint32_t my_plug_audio_ports_count(const clap_plugin_t *plugin, bool is_input) {
-    // Declare 1 audio input and 1 audio output
-    return 1;
-}
-
-static bool
-my_plug_audio_ports_get(const clap_plugin_t *plugin, uint32_t index, bool is_input, clap_audio_port_info_t *info) {
-    if (index > 0)
-        return false;
-    info->id = 0;
-    snprintf(info->name, sizeof(info->name), "%s", "My Port Name");
-    info->channel_count = 2;
-    info->flags = CLAP_AUDIO_PORT_IS_MAIN;
-    info->port_type = CLAP_PORT_STEREO;
-    info->in_place_pair = CLAP_INVALID_ID;
-    return true;
-}
-
-static const clap_plugin_audio_ports_t s_my_plug_audio_ports = {
-        .count = my_plug_audio_ports_count,
-        .get = my_plug_audio_ports_get,
-};
 
 ////////////////////////////
 // clap_plugin_note_ports //
@@ -226,8 +198,6 @@ static clap_process_status my_plug_process(const struct clap_plugin *plugin, con
 static const void *my_plug_get_extension(const struct clap_plugin *plugin, const char *id) {
     if (!strcmp(id, CLAP_EXT_LATENCY))
         return &s_my_plug_latency;
-    if (!strcmp(id, CLAP_EXT_AUDIO_PORTS))
-        return &s_my_plug_audio_ports;
     if (!strcmp(id, CLAP_EXT_NOTE_PORTS))
         return &s_my_plug_note_ports;
     if (!strcmp(id, CLAP_EXT_STATE))

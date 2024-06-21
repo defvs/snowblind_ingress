@@ -1,10 +1,8 @@
-// This file demonstrates how to wire a CLAP plugin.
-// Use it as a starting point to implement Note ON/OFF and parameter change/modulation handling.
-
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <assert.h>
+#include <zmq.h>
 #include <clap/clap.h>
 
 #if __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_THREADS__) && defined(CLAP_HAS_THREADS_H)
@@ -22,19 +20,21 @@ static const clap_plugin_descriptor_t s_my_plug_desc = {
         .support_url = "https://your-domain.com/support",
         .version = "1.4.2",
         .description = "The plugin description.",
-        .features = (const char *[]){CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_STEREO, NULL},
+        .features = (const char *[]) {CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_UTILITY,
+                                      CLAP_PLUGIN_FEATURE_STEREO, NULL},
 };
 
 typedef struct {
-    clap_plugin_t                   plugin;
-    const clap_host_t              *host;
-    const clap_host_latency_t      *host_latency;
-    const clap_host_log_t          *host_log;
+    clap_plugin_t plugin;
+    const clap_host_t *host;
+    const clap_host_latency_t *host_latency;
+    const clap_host_log_t *host_log;
     const clap_host_thread_check_t *host_thread_check;
-    const clap_host_state_t        *host_state;
+    const clap_host_state_t *host_state;
+    void *zmq_context;
+    void *zmq_socket;
     uint32_t latency;
-    // Add your custom data here
-    // e.g., state variables for Note ON/OFF and parameter changes
+    uint8_t layer_id;
 } my_plug_t;
 
 /////////////////////////////
@@ -46,10 +46,8 @@ static uint32_t my_plug_audio_ports_count(const clap_plugin_t *plugin, bool is_i
     return 1;
 }
 
-static bool my_plug_audio_ports_get(const clap_plugin_t    *plugin,
-                                    uint32_t                index,
-                                    bool                    is_input,
-                                    clap_audio_port_info_t *info) {
+static bool
+my_plug_audio_ports_get(const clap_plugin_t *plugin, uint32_t index, bool is_input, clap_audio_port_info_t *info) {
     if (index > 0)
         return false;
     info->id = 0;
@@ -75,16 +73,13 @@ static uint32_t my_plug_note_ports_count(const clap_plugin_t *plugin, bool is_in
     return 1;
 }
 
-static bool my_plug_note_ports_get(const clap_plugin_t   *plugin,
-                                   uint32_t               index,
-                                   bool                   is_input,
-                                   clap_note_port_info_t *info) {
+static bool
+my_plug_note_ports_get(const clap_plugin_t *plugin, uint32_t index, bool is_input, clap_note_port_info_t *info) {
     if (index > 0)
         return false;
     info->id = 0;
     snprintf(info->name, sizeof(info->name), "%s", "My Port Name");
-    info->supported_dialects =
-            CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI_MPE | CLAP_NOTE_DIALECT_MIDI2;
+    info->supported_dialects = CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI_MPE | CLAP_NOTE_DIALECT_MIDI2;
     info->preferred_dialect = CLAP_NOTE_DIALECT_CLAP;
     return true;
 }
@@ -113,13 +108,26 @@ static const clap_plugin_latency_t s_my_plug_latency = {
 
 bool my_plug_state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream) {
     my_plug_t *plug = plugin->plugin_data;
-    // TODO: write the state into stream
+
+    int64_t bytes_written = stream->write(stream, &plug->layer_id, sizeof(plug->layer_id));
+    if (bytes_written != sizeof(plug->layer_id)) {
+        // TODO: Error handling
+        return false;
+    }
     return true;
 }
 
 bool my_plug_state_load(const clap_plugin_t *plugin, const clap_istream_t *stream) {
     my_plug_t *plug = plugin->plugin_data;
-    // TODO: read the state from stream
+
+    int64_t bytes_read = stream->read(stream, &plug->layer_id, sizeof(plug->layer_id));
+    if (bytes_read != sizeof(plug->layer_id)) {
+        // TODO: Error handling
+        return false;
+    }
+
+    // TODO: use layer_id
+
     return true;
 }
 
@@ -136,23 +144,29 @@ static bool my_plug_init(const struct clap_plugin *plugin) {
     my_plug_t *plug = plugin->plugin_data;
 
     // Fetch host's extensions here
-    // Make sure to check that the interface functions are not null pointers
-    plug->host_log = (const clap_host_log_t *)plug->host->get_extension(plug->host, CLAP_EXT_LOG);
-    plug->host_thread_check = (const clap_host_thread_check_t *)plug->host->get_extension(plug->host, CLAP_EXT_THREAD_CHECK);
-    plug->host_latency = (const clap_host_latency_t *)plug->host->get_extension(plug->host, CLAP_EXT_LATENCY);
-    plug->host_state = (const clap_host_state_t *)plug->host->get_extension(plug->host, CLAP_EXT_STATE);
+    plug->host_log = (const clap_host_log_t *) plug->host->get_extension(plug->host, CLAP_EXT_LOG);
+    plug->host_thread_check = (const clap_host_thread_check_t *) plug->host->get_extension(plug->host,
+                                                                                           CLAP_EXT_THREAD_CHECK);
+    plug->host_latency = (const clap_host_latency_t *) plug->host->get_extension(plug->host, CLAP_EXT_LATENCY);
+    plug->host_state = (const clap_host_state_t *) plug->host->get_extension(plug->host, CLAP_EXT_STATE);
+
+    // Initialize ZeroMQ
+    plug->zmq_context = zmq_ctx_new();
+    plug->zmq_socket = zmq_socket(plug->zmq_context, ZMQ_PUB);
+    zmq_bind(plug->zmq_socket, "tcp://*:5555");
+
     return true;
 }
 
 static void my_plug_destroy(const struct clap_plugin *plugin) {
     my_plug_t *plug = plugin->plugin_data;
+    zmq_close(plug->zmq_socket);
+    zmq_ctx_destroy(plug->zmq_context);
     free(plug);
 }
 
-static bool my_plug_activate(const struct clap_plugin *plugin,
-                             double                    sample_rate,
-                             uint32_t                  min_frames_count,
-                             uint32_t                  max_frames_count) {
+static bool my_plug_activate(const struct clap_plugin *plugin, double sample_rate, uint32_t min_frames_count,
+                             uint32_t max_frames_count) {
     return true;
 }
 
@@ -166,50 +180,20 @@ static void my_plug_reset(const struct clap_plugin *plugin) {}
 
 static void my_plug_process_event(my_plug_t *plug, const clap_event_header_t *hdr) {
     if (hdr->space_id == CLAP_CORE_EVENT_SPACE_ID) {
-        switch (hdr->type) {
-            case CLAP_EVENT_NOTE_ON: {
-                const clap_event_note_t *ev = (const clap_event_note_t *)hdr;
-                // TODO: handle note on
-                printf("Note ON: key = %d, velocity = %d\n", ev->key, ev->velocity);
-                break;
-            }
-
-            case CLAP_EVENT_NOTE_OFF: {
-                const clap_event_note_t *ev = (const clap_event_note_t *)hdr;
-                // TODO: handle note off
-                printf("Note OFF: key = %d, velocity = %d\n", ev->key, ev->velocity);
-                break;
-            }
-
-            case CLAP_EVENT_PARAM_VALUE: {
-                const clap_event_param_value_t *ev = (const clap_event_param_value_t *)hdr;
-                // TODO: handle parameter change
-                printf("Parameter Change: param_id = %d, value = %f\n", ev->param_id, ev->value);
-                break;
-            }
-
-            case CLAP_EVENT_PARAM_MOD: {
-                const clap_event_param_mod_t *ev = (const clap_event_param_mod_t *)hdr;
-                // TODO: handle parameter modulation
-                printf("Parameter Modulation: param_id = %d, amount = %f\n", ev->param_id, ev->amount);
-                break;
-            }
-
-                // Add more event types if needed
-
-            default:
-                break;
-        }
+        zmq_msg_t msg;
+        zmq_msg_init_size(&msg, sizeof(clap_event_header_t) + hdr->size);
+        memcpy(zmq_msg_data(&msg), hdr, sizeof(clap_event_header_t) + hdr->size);
+        zmq_msg_send(&msg, plug->zmq_socket, 0);
+        zmq_msg_close(&msg);
     }
 }
 
-static clap_process_status my_plug_process(const struct clap_plugin *plugin,
-                                           const clap_process_t     *process) {
-    my_plug_t     *plug = plugin->plugin_data;
+static clap_process_status my_plug_process(const struct clap_plugin *plugin, const clap_process_t *process) {
+    my_plug_t *plug = plugin->plugin_data;
     const uint32_t nframes = process->frames_count;
     const uint32_t nev = process->in_events->size(process->in_events);
-    uint32_t       ev_index = 0;
-    uint32_t       next_ev_frame = nev > 0 ? 0 : nframes;
+    uint32_t ev_index = 0;
+    uint32_t next_ev_frame = nev > 0 ? 0 : nframes;
 
     for (uint32_t i = 0; i < nframes;) {
         // Handle every event that happens at frame "i"
@@ -224,25 +208,15 @@ static clap_process_status my_plug_process(const struct clap_plugin *plugin,
             ++ev_index;
 
             if (ev_index == nev) {
-                // Reached the end of the event list
                 next_ev_frame = nframes;
                 break;
             }
         }
 
-        // Process every sample until the next event
+        // Pass-through audio processing (no modification)
         for (; i < next_ev_frame; ++i) {
-            // Fetch input samples
-            const float in_l = process->audio_inputs[0].data32[0][i];
-            const float in_r = process->audio_inputs[0].data32[1][i];
-
-            // TODO: process samples, here we simply swap left and right channels
-            const float out_l = in_r;
-            const float out_r = in_l;
-
-            // Store output samples
-            process->audio_outputs[0].data32[0][i] = out_l;
-            process->audio_outputs[0].data32[1][i] = out_r;
+            process->audio_outputs[0].data32[0][i] = process->audio_inputs[0].data32[0][i];
+            process->audio_outputs[0].data32[1][i] = process->audio_inputs[0].data32[1][i];
         }
     }
 
@@ -258,7 +232,6 @@ static const void *my_plug_get_extension(const struct clap_plugin *plugin, const
         return &s_my_plug_note_ports;
     if (!strcmp(id, CLAP_EXT_STATE))
         return &s_my_plug_state;
-    // TODO: add support to CLAP_EXT_PARAMS
     return NULL;
 }
 
@@ -280,8 +253,6 @@ clap_plugin_t *my_plug_create(const clap_host_t *host) {
     p->plugin.get_extension = my_plug_get_extension;
     p->plugin.on_main_thread = my_plug_on_main_thread;
 
-    // Don't call into the host here
-
     return &p->plugin;
 }
 
@@ -291,6 +262,7 @@ clap_plugin_t *my_plug_create(const clap_host_t *host) {
 
 static struct {
     const clap_plugin_descriptor_t *desc;
+
     clap_plugin_t *(CLAP_ABI *create)(const clap_host_t *host);
 } s_plugins[] = {
         {
@@ -308,9 +280,9 @@ plugin_factory_get_plugin_descriptor(const struct clap_plugin_factory *factory, 
     return s_plugins[index].desc;
 }
 
-static const clap_plugin_t *plugin_factory_create_plugin(const struct clap_plugin_factory *factory,
-                                                         const clap_host_t                *host,
-                                                         const char *plugin_id) {
+static const clap_plugin_t *
+plugin_factory_create_plugin(const struct clap_plugin_factory *factory, const clap_host_t *host,
+                             const char *plugin_id) {
     if (!clap_version_is_compatible(host->clap_version)) {
         return NULL;
     }
@@ -334,13 +306,10 @@ static const clap_plugin_factory_t s_plugin_factory = {
 ////////////////
 
 static bool entry_init(const char *plugin_path) {
-    // Perform the plugin initialization
     return true;
 }
 
-static void entry_deinit(void) {
-    // Perform the plugin de-initialization
-}
+static void entry_deinit(void) {}
 
 #ifdef CLAP_HAS_THREAD
 static mtx_t g_entry_lock;
@@ -350,18 +319,15 @@ static once_flag g_entry_once = ONCE_FLAG_INIT;
 static int g_entry_init_counter = 0;
 
 #ifdef CLAP_HAS_THREAD
-// Initializes the necessary mutex for the entry guard
 static void entry_init_guard_init(void) {
-   mtx_init(&g_entry_lock, mtx_plain);
+    mtx_init(&g_entry_lock, mtx_plain);
 }
 #endif
 
-// Thread safe init counter
 static bool entry_init_guard(const char *plugin_path) {
 #ifdef CLAP_HAS_THREAD
     call_once(&g_entry_once, entry_init_guard_init);
-
-   mtx_lock(&g_entry_lock);
+    mtx_lock(&g_entry_lock);
 #endif
 
     const int cnt = ++g_entry_init_counter;
@@ -381,18 +347,15 @@ static bool entry_init_guard(const char *plugin_path) {
     return succeed;
 }
 
-// Thread safe deinit counter
 static void entry_deinit_guard(void) {
 #ifdef CLAP_HAS_THREAD
     call_once(&g_entry_once, entry_init_guard_init);
-
-   mtx_lock(&g_entry_lock);
+    mtx_lock(&g_entry_lock);
 #endif
 
     const int cnt = --g_entry_init_counter;
     assert(cnt >= 0);
 
-    bool succeed = true;
     if (cnt == 0)
         entry_deinit();
 
@@ -415,7 +378,6 @@ static const void *entry_get_factory(const char *factory_id) {
     return NULL;
 }
 
-// This symbol will be resolved by the host
 CLAP_EXPORT const clap_plugin_entry_t clap_entry = {
         .clap_version = CLAP_VERSION_INIT,
         .init = entry_init_guard,

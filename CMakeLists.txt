@@ -19,7 +19,10 @@ target_link_libraries(snowblind_ingress PRIVATE clap ${ZeroMQ_LIBRARIES})
 # Include ZeroMQ headers
 target_include_directories(snowblind_ingress PRIVATE ${ZeroMQ_INCLUDE_DIRS})
 
-# Set the library output directory
+# Set the library output directory and file name
 set_target_properties(snowblind_ingress PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        LIBRARY_OUTPUT_NAME "snowblind_ingress"
+        SUFFIX ".clap"
+        PREFIX ""
 )

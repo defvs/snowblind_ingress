@@ -10,6 +10,8 @@
 #   include <threads.h>
 #endif
 
+#define MAX_MACRO_PARAMS 32
+
 static const clap_plugin_descriptor_t s_my_plug_desc = {
         .clap_version = CLAP_VERSION_INIT,
         .id = "dev.defvs.snowblind-ingress",
@@ -25,6 +27,7 @@ static const clap_plugin_descriptor_t s_my_plug_desc = {
 
 typedef struct {
     uint8_t layer_id;
+    float macro_params[MAX_MACRO_PARAMS];
 } plugin_parameters_t;
 
 typedef struct {
@@ -67,7 +70,80 @@ static const clap_plugin_note_ports_t s_my_plug_note_ports = {
 // clap_params //
 /////////////////
 
+static uint32_t my_plug_params_count(const clap_plugin_t *plugin) {
+    return MAX_MACRO_PARAMS;
+}
 
+static bool my_plug_params_get_info(const clap_plugin_t *plugin, uint32_t param_index, clap_param_info_t *param_info) {
+    if (param_index >= MAX_MACRO_PARAMS)
+        return false;
+
+    param_info->id = param_index;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE;
+    snprintf(param_info->name, sizeof(param_info->name), "Macro %u", param_index + 1);
+    snprintf(param_info->module, sizeof(param_info->module), "Macro");
+    param_info->min_value = 0.0;
+    param_info->max_value = 1.0;
+    param_info->default_value = 0.5;
+
+    return true;
+}
+
+static bool my_plug_params_get_value(const clap_plugin_t *plugin, clap_id param_id, double *out_value) {
+    if (param_id >= MAX_MACRO_PARAMS)
+        return false;
+
+    my_plug_t *plug = plugin->plugin_data;
+    *out_value = plug->parameters.macro_params[param_id];
+    return true;
+}
+
+static bool my_plug_params_value_to_text(const clap_plugin_t *plugin, clap_id param_id, double value, char *out_buffer,
+                                         uint32_t out_buffer_capacity) {
+    snprintf(out_buffer, out_buffer_capacity, "%.2f", value);
+    return true;
+}
+
+static bool my_plug_params_text_to_value(const clap_plugin_t *plugin, clap_id param_id, const char *param_value_text,
+                                         double *out_value) {
+    *out_value = atof(param_value_text);
+    return true;
+}
+
+// Function to send all macro parameters via ZeroMQ
+void send_all_macro_params(my_plug_t *plug) {
+    zmq_msg_t msg;
+    zmq_msg_init_size(&msg, sizeof(plug->parameters));
+    memcpy(zmq_msg_data(&msg), &plug->parameters, sizeof(plug->parameters));
+    zmq_msg_send(&msg, plug->zmq_socket, 0);
+    zmq_msg_close(&msg);
+}
+
+static void
+my_plug_params_flush(const clap_plugin_t *plugin, const clap_input_events_t *in, const clap_output_events_t *out) {
+    my_plug_t *plug = plugin->plugin_data;
+
+    for (uint32_t i = 0; i < in->size(in); ++i) {
+        const clap_event_header_t *hdr = in->get(in, i);
+        if (hdr->type == CLAP_EVENT_PARAM_VALUE) {
+            const clap_event_param_value_t *evt = (const clap_event_param_value_t *) hdr;
+            if (evt->param_id < MAX_MACRO_PARAMS) {
+                plug->parameters.macro_params[evt->param_id] = evt->value;
+                // Send updated parameters via ZeroMQ
+                send_all_macro_params(plug);
+            }
+        }
+    }
+}
+
+static const clap_plugin_params_t s_my_plug_params = {
+        .count = my_plug_params_count,
+        .get_info = my_plug_params_get_info,
+        .get_value = my_plug_params_get_value,
+        .value_to_text = my_plug_params_value_to_text,
+        .text_to_value = my_plug_params_text_to_value,
+        .flush = my_plug_params_flush,
+};
 
 ////////////////
 // clap_state //
@@ -76,8 +152,8 @@ static const clap_plugin_note_ports_t s_my_plug_note_ports = {
 bool my_plug_state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream) {
     my_plug_t *plug = plugin->plugin_data;
 
-    int64_t bytes_written = stream->write(stream, &plug->parameters.layer_id, sizeof(plug->parameters.layer_id));
-    if (bytes_written != sizeof(plug->parameters.layer_id)) {
+    int64_t bytes_written = stream->write(stream, &plug->parameters, sizeof(plug->parameters));
+    if (bytes_written != sizeof(plug->parameters)) {
         // TODO: Error handling
         return false;
     }
@@ -87,13 +163,13 @@ bool my_plug_state_save(const clap_plugin_t *plugin, const clap_ostream_t *strea
 bool my_plug_state_load(const clap_plugin_t *plugin, const clap_istream_t *stream) {
     my_plug_t *plug = plugin->plugin_data;
 
-    int64_t bytes_read = stream->read(stream, &plug->parameters.layer_id, sizeof(plug->parameters.layer_id));
-    if (bytes_read != sizeof(plug->parameters.layer_id)) {
+    int64_t bytes_read = stream->read(stream, &plug->parameters, sizeof(plug->parameters));
+    if (bytes_read != sizeof(plug->parameters)) {
         // TODO: Error handling
         return false;
     }
 
-    // TODO: use layer_id
+    // TODO: update gui
 
     return true;
 }
@@ -194,10 +270,28 @@ static const void *get_extension(const struct clap_plugin *plugin, const char *i
         return &s_my_plug_note_ports;
     if (!strcmp(id, CLAP_EXT_STATE))
         return &s_my_plug_state;
+    if (!strcmp(id, CLAP_EXT_PARAMS))
+        return &s_my_plug_params;
     return NULL;
 }
 
 static void on_main_thread(const struct clap_plugin *plugin) {}
+
+// Function to change a macro parameter
+void set_macro_param(my_plug_t *plug, uint32_t index, float value) {
+    if (index < MAX_MACRO_PARAMS) {
+        plug->parameters.macro_params[index] = value;
+        send_all_macro_params(plug);
+    }
+}
+
+// Function to read a macro parameter
+float get_macro_param(my_plug_t *plug, uint32_t index) {
+    if (index < MAX_MACRO_PARAMS) {
+        return plug->parameters.macro_params[index];
+    }
+    return 0.0f; // Return a default value if index is out of range
+}
 
 clap_plugin_t *my_plug_create(const clap_host_t *host) {
     my_plug_t *p = calloc(1, sizeof(*p));

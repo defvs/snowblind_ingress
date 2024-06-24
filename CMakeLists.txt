@@ -16,7 +16,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZeroMQ REQUIRED libzmq)
 
 # Add the shared library target
-add_library(snowblind_ingress SHARED main.c)
+add_library(snowblind_ingress SHARED src/main.c)
 
 # Link the CLAP and ZeroMQ libraries to the shared library
 target_link_libraries(snowblind_ingress PRIVATE clap ${ZeroMQ_LIBRARIES})

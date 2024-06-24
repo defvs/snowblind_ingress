@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <zmq.h>
-#include <clap/clap.h>
+#include "clap/clap.h"
 
 #if __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_THREADS__) && defined(CLAP_HAS_THREADS_H)
 #   define CLAP_HAS_THREAD
@@ -12,28 +12,30 @@
 
 static const clap_plugin_descriptor_t s_my_plug_desc = {
         .clap_version = CLAP_VERSION_INIT,
-        .id = "com.your-company.YourPlugin",
-        .name = "Plugin Name",
-        .vendor = "Vendor",
-        .url = "https://your-domain.com/your-plugin",
-        .manual_url = "https://your-domain.com/your-plugin/manual",
-        .support_url = "https://your-domain.com/support",
-        .version = "1.4.2",
-        .description = "The plugin description.",
+        .id = "dev.defvs.snowblind-ingress",
+        .name = "Snowblind Ingress",
+        .vendor = "defvs",
+        .url = "https://github.com/defvs/snowblind_ingress",
+        .manual_url = "https://github.com/defvs/snowblind_ingress",
+        .support_url = "https://github.com/defvs/snowblind_ingress",
+        .version = "0.0.1",
+        .description = "TODO: Description",
         .features = (const char *[]) {CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_UTILITY, NULL},
 };
 
 typedef struct {
+    uint8_t layer_id;
+} plugin_parameters_t;
+
+typedef struct {
     clap_plugin_t plugin;
     const clap_host_t *host;
-    const clap_host_latency_t *host_latency;
     const clap_host_log_t *host_log;
     const clap_host_thread_check_t *host_thread_check;
     const clap_host_state_t *host_state;
     void *zmq_context;
     void *zmq_socket;
-    uint32_t latency;
-    uint8_t layer_id;
+    plugin_parameters_t parameters;
 } my_plug_t;
 
 ////////////////////////////
@@ -50,8 +52,8 @@ my_plug_note_ports_get(const clap_plugin_t *plugin, uint32_t index, bool is_inpu
     if (index > 0)
         return false;
     info->id = 0;
-    snprintf(info->name, sizeof(info->name), "%s", "My Port Name");
-    info->supported_dialects = CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI_MPE | CLAP_NOTE_DIALECT_MIDI2;
+    snprintf(info->name, sizeof(info->name), "%s", "Note input");
+    info->supported_dialects = CLAP_NOTE_DIALECT_CLAP;
     info->preferred_dialect = CLAP_NOTE_DIALECT_CLAP;
     return true;
 }
@@ -62,17 +64,10 @@ static const clap_plugin_note_ports_t s_my_plug_note_ports = {
 };
 
 //////////////////
-// clap_latency //
-//////////////////
+// clap_params //
+/////////////////
 
-uint32_t my_plug_latency_get(const clap_plugin_t *plugin) {
-    my_plug_t *plug = plugin->plugin_data;
-    return plug->latency;
-}
 
-static const clap_plugin_latency_t s_my_plug_latency = {
-        .get = my_plug_latency_get,
-};
 
 ////////////////
 // clap_state //
@@ -81,8 +76,8 @@ static const clap_plugin_latency_t s_my_plug_latency = {
 bool my_plug_state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream) {
     my_plug_t *plug = plugin->plugin_data;
 
-    int64_t bytes_written = stream->write(stream, &plug->layer_id, sizeof(plug->layer_id));
-    if (bytes_written != sizeof(plug->layer_id)) {
+    int64_t bytes_written = stream->write(stream, &plug->parameters.layer_id, sizeof(plug->parameters.layer_id));
+    if (bytes_written != sizeof(plug->parameters.layer_id)) {
         // TODO: Error handling
         return false;
     }
@@ -92,8 +87,8 @@ bool my_plug_state_save(const clap_plugin_t *plugin, const clap_ostream_t *strea
 bool my_plug_state_load(const clap_plugin_t *plugin, const clap_istream_t *stream) {
     my_plug_t *plug = plugin->plugin_data;
 
-    int64_t bytes_read = stream->read(stream, &plug->layer_id, sizeof(plug->layer_id));
-    if (bytes_read != sizeof(plug->layer_id)) {
+    int64_t bytes_read = stream->read(stream, &plug->parameters.layer_id, sizeof(plug->parameters.layer_id));
+    if (bytes_read != sizeof(plug->parameters.layer_id)) {
         // TODO: Error handling
         return false;
     }
@@ -112,14 +107,13 @@ static const clap_plugin_state_t s_my_plug_state = {
 // clap_plugin //
 /////////////////
 
-static bool my_plug_init(const struct clap_plugin *plugin) {
+static bool init(const struct clap_plugin *plugin) {
     my_plug_t *plug = plugin->plugin_data;
 
     // Fetch host's extensions here
     plug->host_log = (const clap_host_log_t *) plug->host->get_extension(plug->host, CLAP_EXT_LOG);
     plug->host_thread_check = (const clap_host_thread_check_t *) plug->host->get_extension(plug->host,
                                                                                            CLAP_EXT_THREAD_CHECK);
-    plug->host_latency = (const clap_host_latency_t *) plug->host->get_extension(plug->host, CLAP_EXT_LATENCY);
     plug->host_state = (const clap_host_state_t *) plug->host->get_extension(plug->host, CLAP_EXT_STATE);
 
     // Initialize ZeroMQ
@@ -130,25 +124,25 @@ static bool my_plug_init(const struct clap_plugin *plugin) {
     return true;
 }
 
-static void my_plug_destroy(const struct clap_plugin *plugin) {
+static void destroy(const struct clap_plugin *plugin) {
     my_plug_t *plug = plugin->plugin_data;
     zmq_close(plug->zmq_socket);
     zmq_ctx_destroy(plug->zmq_context);
     free(plug);
 }
 
-static bool my_plug_activate(const struct clap_plugin *plugin, double sample_rate, uint32_t min_frames_count,
-                             uint32_t max_frames_count) {
+static bool activate(const struct clap_plugin *plugin, double sample_rate, uint32_t min_frames_count,
+                     uint32_t max_frames_count) {
     return true;
 }
 
-static void my_plug_deactivate(const struct clap_plugin *plugin) {}
+static void deactivate(const struct clap_plugin *plugin) {}
 
-static bool my_plug_start_processing(const struct clap_plugin *plugin) { return true; }
+static bool start_processing(const struct clap_plugin *plugin) { return true; }
 
-static void my_plug_stop_processing(const struct clap_plugin *plugin) {}
+static void stop_processing(const struct clap_plugin *plugin) {}
 
-static void my_plug_reset(const struct clap_plugin *plugin) {}
+static void reset(const struct clap_plugin *plugin) {}
 
 static void my_plug_process_event(my_plug_t *plug, const clap_event_header_t *hdr) {
     if (hdr->space_id == CLAP_CORE_EVENT_SPACE_ID) {
@@ -160,7 +154,7 @@ static void my_plug_process_event(my_plug_t *plug, const clap_event_header_t *hd
     }
 }
 
-static clap_process_status my_plug_process(const struct clap_plugin *plugin, const clap_process_t *process) {
+static clap_process_status process(const struct clap_plugin *plugin, const clap_process_t *process) {
     my_plug_t *plug = plugin->plugin_data;
     const uint32_t nframes = process->frames_count;
     const uint32_t nev = process->in_events->size(process->in_events);
@@ -195,9 +189,7 @@ static clap_process_status my_plug_process(const struct clap_plugin *plugin, con
     return CLAP_PROCESS_CONTINUE;
 }
 
-static const void *my_plug_get_extension(const struct clap_plugin *plugin, const char *id) {
-    if (!strcmp(id, CLAP_EXT_LATENCY))
-        return &s_my_plug_latency;
+static const void *get_extension(const struct clap_plugin *plugin, const char *id) {
     if (!strcmp(id, CLAP_EXT_NOTE_PORTS))
         return &s_my_plug_note_ports;
     if (!strcmp(id, CLAP_EXT_STATE))
@@ -205,23 +197,23 @@ static const void *my_plug_get_extension(const struct clap_plugin *plugin, const
     return NULL;
 }
 
-static void my_plug_on_main_thread(const struct clap_plugin *plugin) {}
+static void on_main_thread(const struct clap_plugin *plugin) {}
 
 clap_plugin_t *my_plug_create(const clap_host_t *host) {
     my_plug_t *p = calloc(1, sizeof(*p));
     p->host = host;
     p->plugin.desc = &s_my_plug_desc;
     p->plugin.plugin_data = p;
-    p->plugin.init = my_plug_init;
-    p->plugin.destroy = my_plug_destroy;
-    p->plugin.activate = my_plug_activate;
-    p->plugin.deactivate = my_plug_deactivate;
-    p->plugin.start_processing = my_plug_start_processing;
-    p->plugin.stop_processing = my_plug_stop_processing;
-    p->plugin.reset = my_plug_reset;
-    p->plugin.process = my_plug_process;
-    p->plugin.get_extension = my_plug_get_extension;
-    p->plugin.on_main_thread = my_plug_on_main_thread;
+    p->plugin.init = init;
+    p->plugin.destroy = destroy;
+    p->plugin.activate = activate;
+    p->plugin.deactivate = deactivate;
+    p->plugin.start_processing = start_processing;
+    p->plugin.stop_processing = stop_processing;
+    p->plugin.reset = reset;
+    p->plugin.process = process;
+    p->plugin.get_extension = get_extension;
+    p->plugin.on_main_thread = on_main_thread;
 
     return &p->plugin;
 }

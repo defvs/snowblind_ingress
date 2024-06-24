@@ -27,7 +27,7 @@ static const clap_plugin_descriptor_t s_my_plug_desc = {
 
 typedef struct {
     uint8_t layer_id;
-    float macro_params[MAX_MACRO_PARAMS];
+    double macro_params[MAX_MACRO_PARAMS];
 } plugin_parameters_t;
 
 typedef struct {
@@ -255,11 +255,8 @@ static clap_process_status process(const struct clap_plugin *plugin, const clap_
             }
         }
 
-        // Pass-through audio processing (no modification)
-        for (; i < next_ev_frame; ++i) {
-            process->audio_outputs[0].data32[0][i] = process->audio_inputs[0].data32[0][i];
-            process->audio_outputs[0].data32[1][i] = process->audio_inputs[0].data32[1][i];
-        }
+        // Skip the audio processing part and directly increment the frame counter
+        i = next_ev_frame;
     }
 
     return CLAP_PROCESS_CONTINUE;
@@ -278,7 +275,7 @@ static const void *get_extension(const struct clap_plugin *plugin, const char *i
 static void on_main_thread(const struct clap_plugin *plugin) {}
 
 // Function to change a macro parameter
-void set_macro_param(my_plug_t *plug, uint32_t index, float value) {
+void set_macro_param(my_plug_t *plug, uint32_t index, double value) {
     if (index < MAX_MACRO_PARAMS) {
         plug->parameters.macro_params[index] = value;
         send_all_macro_params(plug);
@@ -286,11 +283,11 @@ void set_macro_param(my_plug_t *plug, uint32_t index, float value) {
 }
 
 // Function to read a macro parameter
-float get_macro_param(my_plug_t *plug, uint32_t index) {
+double get_macro_param(my_plug_t *plug, uint32_t index) {
     if (index < MAX_MACRO_PARAMS) {
         return plug->parameters.macro_params[index];
     }
-    return 0.0f; // Return a default value if index is out of range
+    return 0.0; // Return a default value if index is out of range
 }
 
 clap_plugin_t *my_plug_create(const clap_host_t *host) {

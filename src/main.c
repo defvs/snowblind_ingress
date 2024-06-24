@@ -11,6 +11,7 @@
 #endif
 
 #define MAX_MACRO_PARAMS 32
+#define ZMQ_SOCKET_ENDPOINT "tcp://127.0.0.1:5555"
 
 static const clap_plugin_descriptor_t s_my_plug_desc = {
         .clap_version = CLAP_VERSION_INIT,
@@ -194,8 +195,8 @@ static bool init(const struct clap_plugin *plugin) {
 
     // Initialize ZeroMQ
     plug->zmq_context = zmq_ctx_new();
-    plug->zmq_socket = zmq_socket(plug->zmq_context, ZMQ_PUB);
-    zmq_bind(plug->zmq_socket, "tcp://*:5555");
+    plug->zmq_socket = zmq_socket(plug->zmq_context, ZMQ_PUSH);
+    zmq_connect(plug->zmq_socket, ZMQ_SOCKET_ENDPOINT);
 
     return true;
 }
@@ -221,12 +222,20 @@ static void stop_processing(const struct clap_plugin *plugin) {}
 static void reset(const struct clap_plugin *plugin) {}
 
 static void my_plug_process_event(my_plug_t *plug, const clap_event_header_t *hdr) {
-    if (hdr->space_id == CLAP_CORE_EVENT_SPACE_ID) {
-        zmq_msg_t msg;
-        zmq_msg_init_size(&msg, sizeof(clap_event_header_t) + hdr->size);
-        memcpy(zmq_msg_data(&msg), hdr, sizeof(clap_event_header_t) + hdr->size);
-        zmq_msg_send(&msg, plug->zmq_socket, 0);
-        zmq_msg_close(&msg);
+    zmq_msg_t msg;
+
+    switch (hdr->type) {
+        case CLAP_EVENT_NOTE_ON:
+        case CLAP_EVENT_NOTE_OFF:
+        case CLAP_EVENT_TRANSPORT:
+        case CLAP_EVENT_PARAM_VALUE:
+            zmq_msg_init_size(&msg, hdr->size);
+            memcpy(zmq_msg_data(&msg), hdr, hdr->size);
+            zmq_msg_send(&msg, plug->zmq_socket, 0);
+            zmq_msg_close(&msg);
+            break;
+        default:
+            break;
     }
 }
 
